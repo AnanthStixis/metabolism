@@ -183,6 +183,7 @@ function beginScan() {
   currentVitals = null;
   currentTip = "Hold still…";
   scanProgress = 0;
+  resetOcclusionDetector();
   setStatus("Scanning — hold still…");
 }
 
@@ -392,7 +393,34 @@ function sampleRoiRegion(ctx, landmarks, indices, w, h) {
   return { r: rSum / count, g: gSum / count, b: bSum / count, count };
 }
 
-function sampleVitalsFrame(landmarks) {
+// MediaPipe FaceMesh often keeps reporting landmarks (stale/predicted
+// positions) even when a hand covers most of the face — it has no built-in
+// occlusion detection. So occlusion has to be caught from the actual pixel
+// content: a hand suddenly covering the ROI produces a large, abrupt jump
+// in sampled color compared to the established skin-tone baseline.
+let roiBaseline = null; // slow EMA of trusted (non-occluded) ROI color
+let consecutiveOcclusionFrames = 0;
+let consecutiveClearFrames = 0;
+let isOccludedSticky = false; // the state the caller sees — debounced, doesn't flip on a single frame either way
+const OCCLUSION_JUMP_THRESHOLD = 40; // combined |dR|+|dG|+|dB| jump that counts as "covered"
+const OCCLUSION_CONFIRM_FRAMES = 2; // require 2 covered frames in a row to ENTER occluded state
+const OCCLUSION_CLEAR_FRAMES = 5; // require 5 clean frames in a row to LEAVE it — prevents flicker from brief gaps (fingers, partial cover)
+const ROI_BASELINE_ALPHA = 0.05;
+
+function resetOcclusionDetector() {
+  roiBaseline = null;
+  consecutiveOcclusionFrames = 0;
+  consecutiveClearFrames = 0;
+  isOccludedSticky = false;
+}
+
+/**
+ * Returns { sampled, occluded }. Occlusion is always checked (needed even on
+ * motion-flagged frames, so "covered" and "hold still" don't fight over which
+ * one explains the frame). Pushing to the SDK is gated separately by
+ * shouldPush — motion-contaminated samples still must never reach it.
+ */
+function sampleVitalsFrame(landmarks, shouldPush) {
   const w = workCanvas.width;
   const h = workCanvas.height;
   const ctx = workCanvas.getContext("2d");
@@ -409,9 +437,45 @@ function sampleVitalsFrame(landmarks) {
     bTotal += region.b * region.count;
     weightTotal += region.count;
   }
-  if (weightTotal === 0) return;
+  if (weightTotal === 0) return { sampled: false, occluded: false };
 
-  vitalsSdk.pushSample(rTotal / weightTotal, gTotal / weightTotal, bTotal / weightTotal, performance.now());
+  const rAvg = rTotal / weightTotal;
+  const gAvg = gTotal / weightTotal;
+  const bAvg = bTotal / weightTotal;
+
+  // Asymmetric debounce (enter fast, leave slow): a single jumpy frame
+  // shouldn't flip the state either direction. Entering occlusion needs 2
+  // covered frames in a row; leaving it needs 5 clean ones — that asymmetry
+  // is what stops rapid back-and-forth flicker when a hand only partially
+  // covers the face or light leaks through briefly between fingers.
+  if (roiBaseline) {
+    const jump = Math.abs(rAvg - roiBaseline.r) + Math.abs(gAvg - roiBaseline.g) + Math.abs(bAvg - roiBaseline.b);
+    if (jump > OCCLUSION_JUMP_THRESHOLD) {
+      consecutiveOcclusionFrames++;
+      consecutiveClearFrames = 0;
+      if (consecutiveOcclusionFrames >= OCCLUSION_CONFIRM_FRAMES) isOccludedSticky = true;
+    } else {
+      consecutiveClearFrames++;
+      consecutiveOcclusionFrames = 0;
+      if (consecutiveClearFrames >= OCCLUSION_CLEAR_FRAMES) isOccludedSticky = false;
+    }
+  }
+
+  if (isOccludedSticky) return { sampled: false, occluded: true };
+
+  // Only let trusted (non-occluded) samples drift the baseline — otherwise
+  // a sustained cover would slowly "normalize" into the new baseline and
+  // stop being detected as occlusion at all.
+  roiBaseline = roiBaseline
+    ? {
+        r: roiBaseline.r * (1 - ROI_BASELINE_ALPHA) + rAvg * ROI_BASELINE_ALPHA,
+        g: roiBaseline.g * (1 - ROI_BASELINE_ALPHA) + gAvg * ROI_BASELINE_ALPHA,
+        b: roiBaseline.b * (1 - ROI_BASELINE_ALPHA) + bAvg * ROI_BASELINE_ALPHA,
+      }
+    : { r: rAvg, g: gAvg, b: bAvg };
+
+  if (shouldPush) vitalsSdk.pushSample(rAvg, gAvg, bAvg, performance.now());
+  return { sampled: shouldPush, occluded: false };
 }
 
 function onFaceMeshResults(results) {
@@ -490,19 +554,45 @@ function onFaceMeshResults(results) {
   }
 
   // scanPhase === "scanning"
-  faceLostSinceTs = 0;
-
   const bounds = getFaceBoundsCenter(lastLandmarks);
   const motion = prevBoundsCenter ? distance(bounds, prevBoundsCenter) : 0;
   prevBoundsCenter = bounds;
   const isStillEnough = motion < MOTION_PAUSE_THRESHOLD;
 
-  // Only count time and feed the SDK while genuinely still — a moving face
+  // Occlusion is checked every frame regardless of the motion gate below —
+  // covering the face with a hand usually ALSO trips the motion check (the
+  // hand entering frame moves the tracked bounding box), and having both
+  // checks independently decide the displayed state caused them to alternate
+  // frame to frame: "hold still" / "face covered" / normal, flickering both
+  // the overlay and the status text. Occlusion is checked first and wins.
+  const sampleResult = sampleVitalsFrame(lastLandmarks, isStillEnough); // unthrottled — rPPG needs a steady per-frame sample rate
+  const occluded = sampleResult.occluded;
+
+  if (occluded) {
+    if (!faceLostSinceTs) faceLostSinceTs = now;
+    currentTip = "face appears covered — move your hand away.";
+    clearOverlay();
+    setStatus(`Scanning paused — ${currentTip}`);
+    if (now - faceLostSinceTs > FACE_LOST_TIMEOUT_MS) {
+      vitalsSdk.reset();
+      smoothedStats = null;
+      faceTrackedMs = 0;
+      scanProgress = 0;
+      currentConfidence = 0;
+      resetOcclusionDetector();
+    }
+    lastFrameTs = now;
+    if (now - scanStartTs >= MAX_SCAN_MS) finishScan(true);
+    return;
+  }
+
+  faceLostSinceTs = 0;
+
+  // Only count time toward completion while genuinely still — a moving face
   // produces motion-artifact samples that would just contaminate the signal,
   // so this is a real fix, not just a text hint, for "how do I get higher confidence."
   if (isStillEnough) {
     faceTrackedMs += now - lastFrameTs;
-    sampleVitalsFrame(lastLandmarks); // unthrottled — rPPG needs a steady per-frame sample rate
   } else {
     currentTip = "hold very still — motion detected.";
   }
@@ -698,9 +788,13 @@ function getFramingIssue(landmarks) {
   const cx = (minX + maxX) / 2 / w;
   const cy = (minY + maxY) / 2 / h;
 
-  if (widthRatio < 0.22) return "move a little closer to the camera.";
-  if (widthRatio > 0.8) return "move back slightly.";
-  if (Math.abs(cx - 0.5) > 0.18 || Math.abs(cy - 0.5) > 0.18) return "center your face in the frame.";
+  // Wide tolerance on purpose — this only needs to rule out extremes (face
+  // basically not visible, or filling the whole frame), not enforce a
+  // precise distance. Most of the actual signal-quality gating happens via
+  // confidence/HRV later, not here.
+  if (widthRatio < 0.14) return "move a little closer to the camera.";
+  if (widthRatio > 0.92) return "move back slightly.";
+  if (Math.abs(cx - 0.5) > 0.3 || Math.abs(cy - 0.5) > 0.3) return "center your face in the frame.";
   return null;
 }
 
@@ -745,8 +839,6 @@ function computeCoachingTip(landmarks, confidence, rawStats) {
   return "signal locked, finishing up.";
 }
 
-const SWEEP_LOOP_MS = 1800; // continuous scanner-beam animation, independent of actual progress
-
 /** Draws one L-shaped viewfinder corner at (x, y) opening toward (dx, dy). */
 function drawCorner(ctx, x, y, dx, dy, len) {
   ctx.beginPath();
@@ -769,9 +861,12 @@ function drawAlignmentGuide(landmarks, aligned, countdownSeconds) {
 
   const cx = w / 2;
   const cy = h / 2;
-  const rx = w * 0.22;
-  const ry = h * 0.34;
-  const color = aligned ? "rgba(0, 225, 255, 0.95)" : "rgba(255, 255, 255, 0.5)";
+  // Sized as a comfortable target, not a strict boundary — actual acceptance
+  // (getFramingIssue) tolerates a much wider range than this drawn oval, so
+  // the guide reads as "aim roughly here" rather than "fit exactly inside."
+  const rx = w * 0.3;
+  const ry = h * 0.4;
+  const color = aligned ? "rgba(60, 230, 130, 0.95)" : "rgba(255, 255, 255, 0.5)";
 
   ctx.save();
   ctx.setLineDash([8, 6]);
@@ -809,6 +904,37 @@ function drawAlignmentGuide(landmarks, aligned, countdownSeconds) {
  * face, a looping sweep line, and the real confidence-based percentage +
  * "ANALYZING" readout.
  */
+// Sparse facial landmark points for the dot overlay — forehead, brows, eyes,
+// nose, cheeks, lips, jawline. Dots only, deliberately no connecting lines
+// (that "wired"/mesh look was tried and explicitly not wanted).
+const FACE_DOT_INDICES = [
+  10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379,
+  378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127,
+  162, 21, 54, 103, 67, 109,
+  70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+  33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
+  1, 2, 98, 327,
+  61, 291, 0, 17, 405, 181,
+];
+
+// How long one full build-up cycle takes for the not-yet-locked dots to
+// appear in sequence (lockOrder-ranked) before the cycle loops and they
+// build up again — keeps unlocked dots from just sitting there dim.
+const REVEAL_CYCLE_MS = 2200;
+
+// Per-dot randomness for the shimmer/lock-in animation, generated once (not
+// per frame — true per-frame randomness would look like white noise, not an
+// organic twinkle). lockOrder assigns each dot a random position in [0,1]:
+// it doubles as both the reveal-sequence rank (within REVEAL_CYCLE_MS) and
+// the scan-progress threshold at which the dot stops cycling and locks in
+// for good. phase/freq vary each dot's twinkle rhythm so they don't all
+// pulse in sync.
+const FACE_DOT_ANIM = FACE_DOT_INDICES.map(() => ({
+  lockOrder: Math.random(),
+  phase: Math.random() * Math.PI * 2,
+  freq: 1.4 + Math.random() * 1.3, // Hz-ish, varied per dot
+}));
+
 function drawFaceScanOverlay(landmarks, progress, nowTs) {
   const ctx = overlay.getContext("2d");
   const w = overlay.width;
@@ -823,12 +949,74 @@ function drawFaceScanOverlay(landmarks, progress, nowTs) {
   const fx0 = minX - pad, fx1 = maxX + pad;
   const fy0 = minY - pad * 1.3, fy1 = maxY + pad * 0.7;
 
-  const accent = "rgba(0, 225, 255, 0.95)"; // vivid electric cyan — reads clearly against any video feed
+  const accent = "rgba(60, 230, 130, 0.95)"; // vivid green — reads clearly against any video feed
+
+  // Landmark dots across the actual tracked face points — no connecting
+  // lines (that "wired"/mesh look was tried and explicitly not wanted), and
+  // no directional sweep either. Instead: unlocked dots shimmer/twinkle at
+  // their own organic rhythm, and progressively "lock in" to a steady point
+  // as real scan progress advances — a visual echo of the signal actually
+  // solidifying, not just a decorative animation.
+  const tSec = nowTs / 1000;
+  FACE_DOT_INDICES.forEach((i, idx) => {
+    const lm = landmarks[i];
+    if (!lm) return;
+    const px = lm.x * w;
+    const py = lm.y * h;
+    const anim = FACE_DOT_ANIM[idx];
+    const locked = progress >= anim.lockOrder;
+
+    ctx.shadowColor = "rgba(60, 230, 130, 0.75)";
+    if (locked) {
+      const r = 2.2;
+      // Dark halo behind the dot so it stays visible against light skin
+      // tones or bright backgrounds, not just dark video — this is what
+      // was washing the contrast out before.
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "rgba(4, 10, 8, 0.65)";
+      ctx.beginPath();
+      ctx.arc(px, py, r + 1.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(140, 255, 190, 1)";
+      ctx.shadowBlur = 5;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Sequential build-up, not "whole face dim from frame one": a dot
+      // doesn't exist at all until the reveal cycle reaches its assigned
+      // rank (same lockOrder value doubles as reveal rank), then it fades
+      // in and twinkles until either the cycle resets (and it'll reappear
+      // in the same sequence next loop) or it locks in for good.
+      const revealT = (nowTs % REVEAL_CYCLE_MS) / REVEAL_CYCLE_MS;
+      const sinceReveal = revealT - anim.lockOrder;
+      if (sinceReveal < 0) return; // not this dot's turn yet this cycle
+
+      const fadeIn = Math.min(1, sinceReveal / 0.05);
+      const twinkle = 0.5 + 0.5 * Math.sin(tSec * anim.freq + anim.phase);
+      const opacity = (0.3 + twinkle * 0.55) * fadeIn;
+      const radius = 1.4 + twinkle * 1.1;
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = `rgba(4, 10, 8, ${(opacity * 0.55).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(px, py, radius + 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = `rgba(60, 230, 130, ${opacity.toFixed(2)})`;
+      ctx.shadowBlur = twinkle * 5 * fadeIn;
+      ctx.beginPath();
+      ctx.arc(px, py, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+  ctx.shadowBlur = 0;
 
   // Viewfinder corner brackets around the face.
   ctx.strokeStyle = accent;
   ctx.lineWidth = 3;
-  ctx.shadowColor = "rgba(0, 225, 255, 0.55)";
+  ctx.shadowColor = "rgba(60, 230, 130, 0.55)";
   ctx.shadowBlur = 6;
   const cornerLen = (fx1 - fx0) * 0.14;
   drawCorner(ctx, fx0, fy0, 1, 1, cornerLen);
@@ -837,32 +1025,27 @@ function drawFaceScanOverlay(landmarks, progress, nowTs) {
   drawCorner(ctx, fx1, fy1, -1, -1, cornerLen);
   ctx.shadowBlur = 0;
 
-  // Looping horizontal sweep line inside the frame — a "scanning" cue,
-  // independent of the real (confidence-driven) percentage shown below.
-  const loopT = (nowTs % SWEEP_LOOP_MS) / SWEEP_LOOP_MS;
-  const beamY = fy0 + loopT * (fy1 - fy0);
-  const gradient = ctx.createLinearGradient(fx0, 0, fx1, 0);
-  gradient.addColorStop(0, "rgba(0, 225, 255, 0)");
-  gradient.addColorStop(0.5, "rgba(0, 225, 255, 0.9)");
-  gradient.addColorStop(1, "rgba(0, 225, 255, 0)");
-  ctx.strokeStyle = gradient;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(fx0, beamY);
-  ctx.lineTo(fx1, beamY);
-  ctx.stroke();
+  // Readout row — a solid dark background bar behind the text so it stays
+  // legible regardless of what's in the video behind it (skin tone, bright
+  // clothing, etc. could otherwise wash out plain colored text).
+  const barH = 26;
+  const barY = Math.min(fy1 + 10, h - barH - 6);
+  ctx.fillStyle = "rgba(6, 10, 14, 0.75)";
+  ctx.fillRect(fx0, barY, fx1 - fx0, barH);
+  ctx.strokeStyle = "rgba(60, 230, 130, 0.35)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(fx0, barY, fx1 - fx0, barH);
 
-  // Readout text, styled like a scanner HUD.
   ctx.font = "600 10px 'IBM Plex Mono', monospace";
   ctx.fillStyle = accent;
   ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.fillText("ANALYZING DATA", fx0, Math.min(fy1 + 18, h - 8));
+  ctx.textBaseline = "middle";
+  ctx.fillText("ANALYZING DATA", fx0 + 10, barY + barH / 2);
 
   const pct = `${Math.round(progress * 100)}%`;
-  ctx.font = "700 20px 'IBM Plex Mono', monospace";
+  ctx.font = "700 15px 'IBM Plex Mono', monospace";
   ctx.textAlign = "right";
-  ctx.fillText(pct, fx1, Math.min(fy1 + 20, h - 8));
+  ctx.fillText(pct, fx1 - 10, barY + barH / 2);
 }
 
 function clearOverlay() {
