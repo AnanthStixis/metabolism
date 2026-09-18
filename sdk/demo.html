@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Glixify Vitals SDK — Demo Harness</title>
+<style>
+  body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #0f1220; color: #e8eaf5; padding: 24px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p.sub { color: #9aa0b8; font-size: 0.85rem; margin: 0 0 20px; }
+  .layout { display: flex; gap: 24px; flex-wrap: wrap; }
+  .video-wrap { position: relative; width: 360px; height: 270px; background: #000; border-radius: 10px; overflow: hidden; }
+  video, canvas.overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  .panel { background: #171b2e; border-radius: 10px; padding: 16px; min-width: 280px; flex: 1; }
+  .metric { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #262a44; font-size: 0.9rem; }
+  .metric:last-child { border-bottom: none; }
+  .metric .val { font-weight: 700; color: #7c9eff; }
+  button { background: #7c9eff; color: #0f1220; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  #waveform { width: 100%; height: 100px; background: #0f1220; border: 1px solid #262a44; border-radius: 8px; margin-top: 12px; }
+  #log { font-family: monospace; font-size: 0.75rem; color: #6b7290; margin-top: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Glixify Vitals SDK — Standalone Demo</h1>
+  <p class="sub">Tests the rPPG signal processor in isolation, before wiring into the main app. Not the product UI.</p>
+
+  <div class="layout">
+    <div>
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay" class="overlay"></canvas>
+      </div>
+      <button id="startBtn">Start Camera</button>
+      <div id="log"></div>
+    </div>
+
+    <div class="panel">
+      <div class="metric"><span>Heart rate</span><span class="val" id="mHr">–</span></div>
+      <div class="metric"><span>HRV (RMSSD)</span><span class="val" id="mHrv">–</span></div>
+      <div class="metric"><span>Respiratory rate</span><span class="val" id="mRr">–</span></div>
+      <div class="metric"><span>Stress index</span><span class="val" id="mStress">–</span></div>
+      <div class="metric"><span>Confidence</span><span class="val" id="mConf">–</span></div>
+      <div class="metric"><span>Effective FPS</span><span class="val" id="mFs">–</span></div>
+      <canvas id="waveform"></canvas>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="glixify-vitals-sdk.js"></script>
+  <script src="demo.js"></script>
+</body>
+</html>

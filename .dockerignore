@@ -1,0 +1,9 @@
+.git
+.claude
+node_modules
+rppg-eval
+sdk/demo.html
+sdk/demo.js
+sdk/README.md
+Metabolism-Analysis.zip
+*.md

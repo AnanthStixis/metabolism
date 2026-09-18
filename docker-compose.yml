@@ -1,0 +1,6 @@
+services:
+  glixify-signal-scan:
+    build: .
+    ports:
+      - "8443:443"
+    restart: unless-stopped

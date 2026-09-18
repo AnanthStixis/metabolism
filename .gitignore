@@ -1,0 +1,16 @@
+# R&D/validation tooling — Python venv, cloned rPPG-Toolbox, downloaded
+# datasets. Not part of the shipped app; too large for the repo.
+rppg-eval/
+
+# Local Claude Code config, not part of the project.
+.claude/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# Stale/leftover
+Metabolism-Analysis.zip

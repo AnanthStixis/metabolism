@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Face & Metabolism Insight — POC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-mark">◐</span>
+        <div>
+          <div class="brand-name">Face & Metabolism Insight</div>
+          <span class="badge">Proof of concept</span>
+        </div>
+      </div>
+
+      <ol class="stepper">
+        <li class="stepper-item active" data-step="scan">
+          <span class="stepper-dot">1</span>
+          <div>
+            <div class="stepper-label">Face scan</div>
+            <div class="stepper-desc">Camera scan, signal-timed</div>
+          </div>
+        </li>
+        <li class="stepper-item" data-step="questionnaire">
+          <span class="stepper-dot">2</span>
+          <div>
+            <div class="stepper-label">Questionnaire</div>
+            <div class="stepper-desc">6 quick lifestyle questions</div>
+          </div>
+        </li>
+        <li class="stepper-item" data-step="snapshot">
+          <span class="stepper-dot">3</span>
+          <div>
+            <div class="stepper-label">Snapshot</div>
+            <div class="stepper-desc">Combined metabolic signal</div>
+          </div>
+        </li>
+      </ol>
+
+      <p class="disclaimer">
+        Educational demo only. This is <strong>not</strong> a medical device and gives
+        <strong>no medical diagnosis</strong>. Findings are heuristic guesses based on skin tone/texture
+        patterns, not clinical evidence. Always consult a doctor for real health concerns.
+      </p>
+    </aside>
+
+    <main>
+      <section class="step" id="step-scan">
+        <div class="card camera-panel">
+          <div class="card-head">
+            <h2>Face scan</h2>
+            <p>Align your face in the guide and hold still. After the main scan, you'll be prompted to turn left, then right, for a quick skin check on each side.</p>
+          </div>
+          <div class="video-wrap">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="controls">
+            <button id="startBtn" class="btn-primary">Start Camera</button>
+            <button id="captureBtn" class="btn-secondary" disabled>Start Scan</button>
+            <span id="liveDot" class="live-dot" title="Face tracking status"></span>
+          </div>
+          <div class="status-row" id="statusRow">
+            <span id="status">Idle</span>
+          </div>
+          <div class="controls">
+            <button id="toQuestionnaireBtn" class="btn-primary" disabled>Continue to Questions →</button>
+            <button id="rescanBtn" class="btn-secondary" hidden>Rescan</button>
+          </div>
+        </div>
+
+        <div class="card results-panel" id="resultsPanel" hidden>
+          <div class="card-head">
+            <h2>Findings</h2>
+          </div>
+          <div class="tabs" id="resultsTabs" hidden>
+            <button class="tab-btn" data-angle="straight">Straight</button>
+            <button class="tab-btn" data-angle="left">Left side</button>
+            <button class="tab-btn" data-angle="right">Right side</button>
+          </div>
+          <div id="findingsContainer"></div>
+          <div class="vitals-readout" id="vitalsReadout"></div>
+        </div>
+      </section>
+
+      <section class="step" id="step-questionnaire" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>Quick metabolic questionnaire</h2>
+            <p>Six questions — takes about 30 seconds.</p>
+          </div>
+          <div id="questionnaireForm" class="questionnaire-form"></div>
+          <div class="controls">
+            <button id="toSnapshotBtn" class="btn-primary">See my Metabolic Snapshot →</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="step" id="step-snapshot" hidden>
+        <div class="card" id="snapshotContainer"></div>
+      </section>
+    </main>
+  </div>
+
+  <canvas id="workCanvas" hidden></canvas>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="rules.js"></script>
+  <script src="sdk/glixify-vitals-sdk.js"></script>
+  <script src="vitals.js"></script>
+  <script src="questionnaire.js"></script>
+  <script src="snapshot.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
